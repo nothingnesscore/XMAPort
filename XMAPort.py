@@ -156,6 +156,18 @@ def is_safe_device_name(name):
     return bool(DEVICE_NAME_RE.fullmatch(name.strip()))
 
 
+def infer_device_from_url(url):
+    if not url:
+        return ""
+    fname = url.rstrip("/").split("/")[-1].lower()
+    m = re.match(r"^([a-z0-9]+)(?:_global|-ota|_eea|_in|_ru|_tw|_id|_tr|_jp)?", fname)
+    if m:
+        cand = m.group(1)
+        if cand not in ("miui", "xiaomi", "redmi", "poco", "ota", "full"):
+            return cand
+    return ""
+
+
 def run_tool(cmd, **kwargs):
     # 外部工具超过 10 分钟仍未退出时终止，避免流程永久挂起。
     label = Path(cmd[0]).name if cmd else "external tool"
@@ -373,21 +385,23 @@ def read_packing_config():
     cfg = {
         "format": "erofs",
         "compression": "lz4hc",
-        "compression_level": "9",
-        "device_size": "6979321856",
+        "compression_level": "8",
+        "device_size": "9126805504",
         "metadata_size": "65536",
         "sparse": "true",
-        "pack_super": "false",
+        "pack_super": "true",
         "super_name": "super",
-        "super_group": "main",
+        "super_group": "qti_dynamic_partitions",
         "metadata_slots": "3",
         "virtual_ab": "true",
         "is_skip_apex": "false",
-        "enable_adb_debug": "false",
+        "enable_adb_debug": "true",
         "patch_vbmeta": "true",
         "utc_stamp": "",
         "erofs_old_kernel": "false",
         "device_platform": "qualcomm",
+        "target_device": "peridot",
+        "device": "peridot",
     }
     if CONFIG.exists():
         for raw in CONFIG.read_text(encoding="gbk", errors="ignore").splitlines():
@@ -409,18 +423,21 @@ def create_config():
 ; XMAPort config file
 ; ============================================
 
+; Device codename: peridot, fuxi, sheng, etc.
+target_device=peridot
+
 ; Device platform: Qualcomm/MTK, must be filled in correctly
 device_platform=Qualcomm
 
 [source]
 ; Source ROM download URL (direct URL, must not start with ultimateota)
 ; Used to extract system / system_ext / product / mi_ext partitions
-url=https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.0.15.XPACNXM/nezha-ota_full-OS4.0.0.15.XPACNXM-user-17.0-87b65524dc.zip
+url=https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.0.9.XPCMIXM/pudding_global-ota_full-OS4.0.0.9.XPCMIXM-user-17.0-4fe981b89f.zip
 
 [target]
 ; Base ROM download URL (direct URL, must not start with ultimateota)
 ; Used to extract odm / vendor target partitions
-url=https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS2.0.204.0.VMWCNXM/sky-ota_full-OS2.0.204.0.VMWCNXM-user-15.0-5b8f723fe7.zip
+url=https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS3.0.303.0.WNPMIXM/peridot_global-ota_full-OS3.0.303.0.WNPMIXM-user-16.0-9eb06ac062.zip
 
 [settings]
 ; aria2c download settings
@@ -444,7 +461,7 @@ retry=5
 format=erofs
 
 ; Whether to pack super.img
-pack_super=false
+pack_super=true
 
 ; Whether to generate sparse format image
 sparse=true
@@ -455,8 +472,8 @@ utc_stamp=
 ; ============================================
 ; Super partition settings, fill in per device
 ; ============================================
-; Total size allocated for device super partition, default 6.5GB
-device_size=6979321856
+; Total size allocated for device super partition (peridot: 8.5GB = 9126805504 bytes)
+device_size=9126805504
 
 ; Keep the rest as default
 ; metadata partition size (bytes)
@@ -1100,19 +1117,32 @@ def one_click_port(auto=False):
     if CLI_DEVICE:
         TARGET_DEVICE = CLI_DEVICE.strip()
         info("Device codename from --device: {}".format(TARGET_DEVICE))
+    elif pack_cfg.get("target_device"):
+        TARGET_DEVICE = pack_cfg["target_device"].strip()
+        info("Device codename from config.ini (target_device): {}".format(TARGET_DEVICE))
+    elif pack_cfg.get("device"):
+        TARGET_DEVICE = pack_cfg["device"].strip()
+        info("Device codename from config.ini (device): {}".format(TARGET_DEVICE))
     elif cfg_txt.exists():
         for line in cfg_txt.read_text(encoding="gbk", errors="ignore").splitlines():
             if line.startswith("TARGET_DEVICE="):
                 TARGET_DEVICE = line.split("=", 1)[1].strip()
                 break
     elif auto:
-        err("Target device codename not provided (--device) and config.txt missing")
-        log_write("ERROR: no device codename in auto mode")
-        return 1
+        inferred = infer_device_from_url(TGT_URL)
+        if inferred:
+            TARGET_DEVICE = inferred
+            info("Device codename inferred from target URL: {}".format(TARGET_DEVICE))
+        else:
+            err("Target device codename not provided (--device, config.ini, or target URL) and config.txt missing")
+            log_write("ERROR: no device codename in auto mode")
+            return 1
     else:
-        print("  {}  Enter target device codename:{}".format(W, N))
-        print("  {}  (e.g. sheng, fuxi, cupid, mondrian){}".format(D, N))
-        TARGET_DEVICE = prompt("  > ").strip()
+        default_dev = pack_cfg.get("target_device") or pack_cfg.get("device") or infer_device_from_url(TGT_URL) or "peridot"
+        print("  {}  Enter target device codename (default: {}):{}".format(W, default_dev, N))
+        print("  {}  (e.g. peridot, sheng, fuxi, cupid, mondrian){}".format(D, N))
+        dev_input = prompt("  > ").strip()
+        TARGET_DEVICE = dev_input if dev_input else default_dev
 
     if not is_safe_device_name(TARGET_DEVICE):
         err("Invalid device codename: only A-Z, a-z, 0-9, underscore and hyphen are allowed")
@@ -1411,6 +1441,7 @@ def one_click_port(auto=False):
         SRC_FS / "odm" / "etc" / "build.prop",
         SRC_FS / "product" / "etc" / "build.prop",
         SRC_FS / "system" / "system" / "build.prop",
+        SRC_FS / "system_ext" / "etc" / "build.prop",
     ]
     bp_path = None
     for cand in bp_candidates:
@@ -1425,20 +1456,24 @@ def one_click_port(auto=False):
             props_text = bp_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             props_text = ""
-        for key in [
-            "ro.product.odm.device", "ro.product.odm.model",
-            "ro.product.odm.marketname", "ro.product.odm.brand",
-            "ro.product.odm.name", "ro.product.odm.manufacturer",
-        ]:
-            label = key.split(".")[-1]
-            if label == "manufacturer":
-                label = "vendor"
-            for line in props_text.splitlines():
-                if "=" in line and line.split("=", 1)[0].strip() == key:
-                    val = line.split("=", 1)[1].strip()
-                    print("  {}  {}: {}{}{}".format(W, label.ljust(10), C, val, N))
-                    rom_info_lines.append("{}: {}".format(label, val))
-                    break
+        prop_dict = {}
+        for line in props_text.splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                prop_dict[k.strip()] = v.strip()
+        fields = [
+            ("device", ["ro.product.odm.device", "ro.product.product.device", "ro.product.system.device", "ro.product.device"]),
+            ("model", ["ro.product.odm.model", "ro.product.product.model", "ro.product.system.model", "ro.product.model"]),
+            ("marketname", ["ro.product.odm.marketname", "ro.product.product.marketname", "ro.product.marketname"]),
+            ("brand", ["ro.product.odm.brand", "ro.product.product.brand", "ro.product.system.brand", "ro.product.brand"]),
+            ("name", ["ro.product.odm.name", "ro.product.product.name", "ro.product.system.name", "ro.product.name"]),
+            ("vendor", ["ro.product.odm.manufacturer", "ro.product.product.manufacturer", "ro.product.manufacturer"]),
+        ]
+        for label, keys in fields:
+            val = next((prop_dict[k] for k in keys if k in prop_dict), None)
+            if val:
+                print("  {}  {}: {}{}{}".format(W, label.ljust(10), C, val, N))
+                rom_info_lines.append("{}: {}".format(label, val))
     print("  {}  ------------------------------{}".format(C, N))
     rom_info_lines.append("-------------------------------")
     if AUTO_MODE:

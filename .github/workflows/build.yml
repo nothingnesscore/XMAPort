@@ -8,16 +8,19 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: '目标设备代号 (e.g. sheng, fuxi, cupid, mondrian)'
-        required: true
+        description: '目标设备代号 (Target device, default: peridot)'
+        required: false
+        default: 'peridot'
         type: string
       source:
         description: '源 ROM 直链（留空用 config.ini）'
         required: false
+        default: ''
         type: string
       target:
         description: '目标 ROM 直链（留空用 config.ini）'
         required: false
+        default: ''
         type: string
 
 jobs:
@@ -42,7 +45,8 @@ jobs:
       - name: Run XMAPort
         shell: pwsh
         run: |
-          $args = @("--auto", "--device", "${{ inputs.device }}")
+          $device = if ("${{ inputs.device }}") { "${{ inputs.device }}" } else { "peridot" }
+          $args = @("--auto", "--device", $device)
           if ("${{ inputs.source }}") { $args += "--source"; $args += "${{ inputs.source }}" }
           if ("${{ inputs.target }}") { $args += "--target"; $args += "${{ inputs.target }}" }
           python XMAPort.py @args
@@ -50,8 +54,9 @@ jobs:
       - name: Compress and split super.img
         shell: pwsh
         run: |
+          $device = if ("${{ inputs.device }}") { "${{ inputs.device }}" } else { "peridot" }
           if (-not (Test-Path workspace\packed\super.img)) { Write-Error "super.img not found"; exit 1 }
-          .\tools\7z.exe a -t7z -mx=5 -v1900m workspace\super-${{ inputs.device }}.7z workspace\packed\super.img
+          .\tools\7z.exe a -t7z -mx=5 -v1900m "workspace\super-${device}.7z" workspace\packed\super.img
           if ($LASTEXITCODE -ne 0) { Write-Error "7z failed (exit $LASTEXITCODE)"; exit 1 }
 
       - name: Upload to Release
@@ -59,13 +64,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $device = if ("${{ inputs.device }}") { "${{ inputs.device }}" } else { "peridot" }
           $date = Get-Date -Format "MMdd"
           $n = 1
-          $prefix = "XMAPort-Output-${{ inputs.device }}-$date"
+          $prefix = "XMAPort-Output-${device}-$date"
           while (gh release view "$prefix-$n" 2>$null) { $n++ }
           $tag = "$prefix-$n"
 
-          $volFiles = @(Get-ChildItem "workspace\super-${{ inputs.device }}.7z.*" | ForEach-Object { $_.FullName })
+          $volFiles = @(Get-ChildItem "workspace\super-${device}.7z.*" | ForEach-Object { $_.FullName })
           if (-not $volFiles) { Write-Error "no split volumes found"; exit 1 }
           $logFiles = @(Get-ChildItem "workspace\*.log" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
           $allFiles = $volFiles + $logFiles
@@ -74,11 +80,11 @@ jobs:
           if (Test-Path workspace\rom_info.txt) {
             $romInfo += Get-Content workspace\rom_info.txt -Encoding UTF8 | Where-Object { $_ -match '^\S+:\s*\S+' }
           } else {
-            $romInfo += "device: ${{ inputs.device }}"
+            $romInfo += "device: $device"
           }
-          $notes = "移植输出（分卷 7z，每卷 <=2GB）。`n`n" + ($romInfo -join "`n") + "`n`n合并解压：`n7z x super-${{ inputs.device }}.7z.001"
+          $notes = "移植输出（分卷 7z，每卷 <=2GB）。`n`n" + ($romInfo -join "`n") + "`n`n合并解压：`n7z x super-${device}.7z.001"
 
-          gh release create $tag $allFiles --title "XMAPort ${{ inputs.device }} $date #$n" --notes $notes --latest
+          gh release create $tag $allFiles --title "XMAPort $device $date #$n" --notes $notes --latest
 
   build:
     if: github.event_name == 'push'

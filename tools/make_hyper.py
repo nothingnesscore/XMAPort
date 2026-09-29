@@ -312,6 +312,19 @@ def sync_features(parent_dir):
                     target_name = trim_str(v)
                     break
 
+    if not target_name:
+        ini_path = os.path.join(parent_dir, "config.ini")
+        if os.path.exists(ini_path):
+            with open(ini_path, "r", encoding="gbk", errors="ignore") as f:
+                for line in f:
+                    line = line.rstrip("\r\n")
+                    if "=" not in line or line.startswith(";"):
+                        continue
+                    k, v = line.split("=", 1)
+                    if trim_str(k).lower() in ("target_device", "device"):
+                        target_name = trim_str(v)
+                        break
+
     if not re.fullmatch(r"[A-Za-z0-9_-]+", target_name):
         LOG_ERROR("Unsafe TARGET_DEVICE rejected: " + target_name)
         return 1
