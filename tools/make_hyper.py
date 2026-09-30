@@ -852,6 +852,104 @@ def patch_build_prop(parent_dir):
     return 0
 
 
+# Map of section name -> relative path inside source_filesystem
+_CUSTOM_PROP_TARGETS = {
+    "custom_props_product": os.path.join("product", "build.prop"),
+    "custom_props_system":  os.path.join("system", "system", "build.prop"),
+    "custom_props_vendor":  os.path.join("vendor", "build.prop"),
+    "custom_props_odm":     os.path.join("odm", "etc", "build.prop"),
+}
+
+
+def _append_props_to_file(prop_path, lines, section_label):
+    """Append a list of prop lines to a build.prop file."""
+    if not os.path.exists(prop_path):
+        LOG_INFO("  [SKIP] " + section_label + ": file not found: " + prop_path)
+        return 0
+
+    need_newline = True
+    try:
+        with open(prop_path, "rb") as f:
+            f.seek(0, 2)
+            if f.tell() > 0:
+                f.seek(-1, 2)
+                if f.read(1) == b"\n":
+                    need_newline = False
+    except Exception:
+        pass
+
+    added = 0
+    try:
+        with open(prop_path, "a", encoding="utf-8", errors="ignore") as f:
+            if need_newline:
+                f.write("\n")
+            f.write("# --- XMAPort custom_props ---\n")
+            for line in lines:
+                f.write(line + "\n")
+                added += 1
+    except Exception as e:
+        LOG_ERROR("  Write failed for " + prop_path + ": " + str(e))
+        return 1
+
+    LOG_INFO("  [OK] " + section_label + ": appended " + int_to_str(added) + " line(s) -> " + prop_path)
+    return 0
+
+
+def apply_custom_props(parent_dir):
+    LOG_INFO("")
+    LOG_INFO("========================================")
+    LOG_INFO("  Apply custom props from config.ini")
+    LOG_INFO("========================================")
+
+    ini_path = os.path.join(parent_dir, "config.ini")
+    if not os.path.exists(ini_path):
+        LOG_INFO("config.ini not found, skipping custom props.")
+        return 0
+
+    try:
+        with open(ini_path, "rb") as f:
+            raw = f.read()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raw = raw[3:]
+        text = raw.decode("gbk", errors="ignore")
+    except Exception as e:
+        LOG_ERROR("Failed to read config.ini: " + str(e))
+        return 0
+
+    # Parse all [custom_props_*] sections
+    sections = {}
+    current_section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1].lower()
+            if current_section in _CUSTOM_PROP_TARGETS:
+                sections.setdefault(current_section, [])
+            else:
+                current_section = None
+        elif current_section in _CUSTOM_PROP_TARGETS:
+            sections[current_section].append(line.rstrip("\r\n"))
+
+    if not sections:
+        LOG_INFO("No [custom_props_product/system/vendor/odm] sections in config.ini, skipping.")
+        return 0
+
+    src_fs = os.path.join(parent_dir, "workspace", "source_filesystem")
+    total_failed = 0
+    for section, lines in sections.items():
+        rel_path = _CUSTOM_PROP_TARGETS[section]
+        full_path = os.path.join(src_fs, rel_path)
+        LOG_INFO("Applying [" + section + "] -> " + rel_path)
+        rc = _append_props_to_file(full_path, lines, section)
+        if rc != 0:
+            total_failed += 1
+
+    LOG_INFO("Custom props applied. Sections: " + int_to_str(len(sections)) +
+             ", failed: " + int_to_str(total_failed))
+    LOG_INFO("========================================")
+    return total_failed
+
+
 def extract_int_attr_value(line, attr_name):
     key = 'name="' + attr_name + '"'
     pos = line.find(key)
@@ -1512,6 +1610,7 @@ def run_speed_pipeline(parent_dir):
         ("Remove vk props from product build.prop", clean_vk_props),
         ("Remove preinstalled apps from data-app/data_app", clean_data_apps),
         ("Patch build prop from config.ini", patch_build_prop),
+        ("Apply custom props from config.ini", apply_custom_props),
         ("Synchronize fpsList + smart_fps_value + support_max_fps", sync_fps_list),
         ("Synchronize display_id configs", sync_display_config),
         ("Migrate MiuiCamera + TURN_SCREEN_ON perm", sync_miui_camera),

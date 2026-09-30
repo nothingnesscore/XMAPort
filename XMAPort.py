@@ -1369,6 +1369,20 @@ def one_click_port(auto=False):
     if (TGT_UNPACK / "vendor_dlkm.img").exists():
         copy_partition_image("vendor_dlkm", TGT_UNPACK / "vendor_dlkm.img", pack_cfg, lpc_args, counters)
 
+    # 复制 system_dlkm（优先目标 payload，其次源 payload）
+    # system_dlkm 含 GKI 内核模块，必须与正在运行的内核版本匹配。
+    # 由于我们保留目标设备（peridot）的 boot.img，system_dlkm 应来自目标 ROM。
+    if (TGT_UNPACK / "system_dlkm.img").exists():
+        log_write("Copying system_dlkm from target payload (kernel module match)")
+        info("Adding system_dlkm from target payload (GKI kernel modules)...")
+        copy_partition_image("system_dlkm", TGT_UNPACK / "system_dlkm.img", pack_cfg, lpc_args, counters)
+    elif (SRC_UNPACK / "system_dlkm.img").exists():
+        log_write("Copying system_dlkm from source payload (target has none)")
+        info("Adding system_dlkm from source payload...")
+        copy_partition_image("system_dlkm", SRC_UNPACK / "system_dlkm.img", pack_cfg, lpc_args, counters)
+    else:
+        log_write("WARNING: system_dlkm.img not found in source or target payload, skipping")
+
     # 生成 super.img；空间不足(rc=1)时自动极限精简 → 重打包 product → 重试一次
     log_write("Creating super.img (pack_super={})".format(pack_cfg.get("pack_super", "false")))
     super_rc = create_super_img(pack_cfg, lpc_args, counters["pack_ok"])
