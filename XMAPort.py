@@ -1339,19 +1339,21 @@ def one_click_port(auto=False):
     info("Adding mi_ext from source payload...")
     copy_partition_image("mi_ext", SRC_UNPACK / "mi_ext.img", pack_cfg, lpc_args, counters)
 
-    # 处理 vendor：MTK 从 target filesystem 重新打包；高通直接复制目标 payload
+    # 处理 vendor：MTK 或 vendor 被修改时从 target filesystem 重新打包；否则直接复制目标 payload
     device_platform = pack_cfg.get("device_platform", "qualcomm").lower()
-    if device_platform == "mtk":
-        # unpack_all_img 不包含 vendor，需补充解包到 target_filesystem
+    vendor_patched = (WORKSPACE / "vendor_patched.txt").exists()
+    if device_platform == "mtk" or vendor_patched:
+        # 需从 target_filesystem 打包 vendor
         if not (TGT_FS / "vendor").exists():
-            log_write("MTK: extracting vendor.img to target filesystem")
-            info("Extracting vendor.img for MTK vendor repack...")
+            log_write("Extracting vendor.img to target filesystem for repack")
+            info("Extracting vendor.img for vendor repack...")
             img = TGT_UNPACK / "vendor.img"
             if img.exists():
                 os.makedirs(TGT_FS / "vendor", exist_ok=True)
                 run_tool([PY, str(TOOLS / "extract_img.py"), str(img), str(TGT_FS / "vendor")])
-        log_write("Packing vendor from target filesystem (MTK)")
-        info("Packing partition: vendor (MTK)")
+        reason = "MTK" if device_platform == "mtk" else "custom props"
+        log_write("Packing vendor from target filesystem ({})".format(reason))
+        info("Packing partition: vendor ({})...".format(reason))
         if (TGT_FS / "vendor").exists():
             pack_one_partition("vendor", TGT_FS, pack_cfg, lpc_args, counters)
         else:

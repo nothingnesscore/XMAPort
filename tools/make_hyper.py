@@ -852,46 +852,89 @@ def patch_build_prop(parent_dir):
     return 0
 
 
-# Map of section name -> relative path inside source_filesystem
+# Map of section name -> (filesystem_name, list of candidate relative paths)
 _CUSTOM_PROP_TARGETS = {
-    "custom_props_product": os.path.join("product", "build.prop"),
-    "custom_props_system":  os.path.join("system", "system", "build.prop"),
-    "custom_props_vendor":  os.path.join("vendor", "build.prop"),
-    "custom_props_odm":     os.path.join("odm", "etc", "build.prop"),
+    "custom_props_product": ("source_filesystem", [
+        os.path.join("product", "build.prop"),
+        os.path.join("product", "etc", "build.prop"),
+    ]),
+    "custom_props_system":  ("source_filesystem", [
+        os.path.join("system", "system", "build.prop"),
+        os.path.join("system", "build.prop"),
+    ]),
+    "custom_props_vendor":  ("target_filesystem", [
+        os.path.join("vendor", "build.prop"),
+        os.path.join("vendor", "etc", "build.prop"),
+    ]),
+    "custom_props_odm":     ("target_filesystem", [
+        os.path.join("odm", "etc", "build.prop"),
+        os.path.join("odm", "build.prop"),
+    ]),
 }
 
 
-def _append_props_to_file(prop_path, lines, section_label):
-    """Append a list of prop lines to a build.prop file."""
+def _update_props_in_file(prop_path, lines, section_label):
+    """Update or append props in a build.prop file.
+    Existing keys are replaced in-place so ro.* properties take effect properly.
+    New keys and comments are appended.
+    """
     if not os.path.exists(prop_path):
         LOG_INFO("  [SKIP] " + section_label + ": file not found: " + prop_path)
         return 0
 
-    need_newline = True
     try:
-        with open(prop_path, "rb") as f:
-            f.seek(0, 2)
-            if f.tell() > 0:
-                f.seek(-1, 2)
-                if f.read(1) == b"\n":
-                    need_newline = False
-    except Exception:
-        pass
+        with open(prop_path, "r", encoding="utf-8", errors="ignore") as f:
+            existing_lines = f.read().splitlines()
+    except Exception as e:
+        LOG_ERROR("  Read failed for " + prop_path + ": " + str(e))
+        return 1
 
-    added = 0
+    # Map existing property keys to line index
+    key_to_index = {}
+    for idx, l in enumerate(existing_lines):
+        trimmed = l.strip()
+        if trimmed and not trimmed.startswith("#") and "=" in trimmed:
+            k = trimmed.split("=", 1)[0].strip()
+            # Store the first occurrence (since Android property service honors first match)
+            if k not in key_to_index:
+                key_to_index[k] = idx
+
+    replaced_count = 0
+    appended_lines = []
+
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        if trimmed.startswith("#") or "=" not in trimmed:
+            appended_lines.append(line)
+            continue
+
+        key, val = trimmed.split("=", 1)
+        key = key.strip()
+        if key in key_to_index:
+            idx = key_to_index[key]
+            old_line = existing_lines[idx]
+            existing_lines[idx] = trimmed
+            replaced_count += 1
+            LOG_INFO("  [REPLACE] " + old_line.strip() + " -> " + trimmed)
+        else:
+            appended_lines.append(line)
+
+    final_lines = list(existing_lines)
+    if appended_lines:
+        final_lines.append("# --- XMAPort " + section_label + " ---")
+        final_lines.extend(appended_lines)
+
     try:
-        with open(prop_path, "a", encoding="utf-8", errors="ignore") as f:
-            if need_newline:
-                f.write("\n")
-            f.write("# --- XMAPort custom_props ---\n")
-            for line in lines:
-                f.write(line + "\n")
-                added += 1
+        with open(prop_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(final_lines) + "\n")
     except Exception as e:
         LOG_ERROR("  Write failed for " + prop_path + ": " + str(e))
         return 1
 
-    LOG_INFO("  [OK] " + section_label + ": appended " + int_to_str(added) + " line(s) -> " + prop_path)
+    LOG_INFO("  [OK] " + section_label + ": " + int_to_str(replaced_count) + " replaced, " +
+             int_to_str(len(appended_lines)) + " appended -> " + prop_path)
     return 0
 
 
@@ -916,7 +959,6 @@ def apply_custom_props(parent_dir):
         LOG_ERROR("Failed to read config.ini: " + str(e))
         return 0
 
-    # Parse all [custom_props_*] sections
     sections = {}
     current_section = None
     for line in text.splitlines():
@@ -934,15 +976,64 @@ def apply_custom_props(parent_dir):
         LOG_INFO("No [custom_props_product/system/vendor/odm] sections in config.ini, skipping.")
         return 0
 
-    src_fs = os.path.join(parent_dir, "workspace", "source_filesystem")
     total_failed = 0
+    vendor_modified = False
+
     for section, lines in sections.items():
-        rel_path = _CUSTOM_PROP_TARGETS[section]
-        full_path = os.path.join(src_fs, rel_path)
-        LOG_INFO("Applying [" + section + "] -> " + rel_path)
-        rc = _append_props_to_file(full_path, lines, section)
+        if not lines:
+            continue
+        fs_type, candidates = _CUSTOM_PROP_TARGETS[section]
+        base_dir = os.path.join(parent_dir, "workspace", fs_type)
+
+        # If vendor needs to be patched but hasn't been extracted to target_filesystem/vendor yet, extract it!
+        if section == "custom_props_vendor":
+            vendor_dir = os.path.join(base_dir, "vendor")
+            if not os.path.exists(vendor_dir):
+                target_payload = os.path.join(parent_dir, "workspace", "target_payload")
+                vendor_img = os.path.join(target_payload, "vendor.img")
+                extract_script = os.path.join(parent_dir, "tools", "extract_img.py")
+                if os.path.exists(vendor_img) and os.path.exists(extract_script):
+                    LOG_INFO("Extracting vendor.img for custom vendor props...")
+                    os.makedirs(vendor_dir, exist_ok=True)
+                    subprocess.run([sys.executable, extract_script, vendor_img, vendor_dir], check=False)
+
+        chosen_path = None
+        for cand in candidates:
+            p = os.path.join(base_dir, cand)
+            if os.path.exists(p):
+                chosen_path = p
+                break
+
+        if not chosen_path:
+            # Fallback: check all candidates or create under first candidate if parent dir exists
+            for cand in candidates:
+                cand_full = os.path.join(base_dir, cand)
+                cand_parent = os.path.dirname(cand_full)
+                if os.path.exists(cand_parent):
+                    chosen_path = cand_full
+                    break
+
+        if not chosen_path:
+            LOG_ERROR("Could not find suitable target path for [" + section + "] under " + base_dir)
+            total_failed += 1
+            continue
+
+        LOG_INFO("Applying [" + section + "] -> " + chosen_path)
+        rc = _update_props_in_file(chosen_path, lines, section)
         if rc != 0:
             total_failed += 1
+        elif section == "custom_props_vendor":
+            vendor_modified = True
+
+    if vendor_modified:
+        # Write marker file so XMAPort knows to pack vendor instead of direct copy
+        try:
+            marker = os.path.join(parent_dir, "workspace", "vendor_patched.txt")
+            with open(marker, "w", encoding="ascii") as mf:
+                mf.write("vendor_patched=true\n")
+            LOG_INFO("Created vendor_patched.txt marker for partition repack.")
+        except Exception:
+            pass
 
     LOG_INFO("Custom props applied. Sections: " + int_to_str(len(sections)) +
              ", failed: " + int_to_str(total_failed))
